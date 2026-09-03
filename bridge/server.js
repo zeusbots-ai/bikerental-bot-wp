@@ -19,6 +19,44 @@ if (!fs.existsSync(MEDIA_STORAGE_PATH)) {
     fs.mkdirSync(MEDIA_STORAGE_PATH, { recursive: true });
 }
 
+// v3: Railway/Render kill containers with SIGKILL on redeploy, so Chromium
+// never gets a chance to remove its own singleton lock files. Because the
+// session lives on a persistent volume, a stale lock from the PREVIOUS
+// container survives and makes the NEXT launch fail with:
+//   "Error: Failed to launch the browser process: Code: 21"
+//   "The profile appears to be in use by another Chromium process..."
+// Clearing these lock files (never the session/auth data itself) on every
+// boot is safe since we only ever run a single replica.
+function clearStaleChromiumLocks(rootDir) {
+    const lockFilenames = new Set(['SingletonLock', 'SingletonCookie', 'SingletonSocket']);
+    if (!fs.existsSync(rootDir)) return;
+
+    const stack = [rootDir];
+    while (stack.length) {
+        const dir = stack.pop();
+        let entries;
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch (e) {
+            continue;
+        }
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                stack.push(fullPath);
+            } else if (lockFilenames.has(entry.name)) {
+                try {
+                    fs.unlinkSync(fullPath);
+                    console.log(`[WhatsApp Bridge] Removed stale Chromium lock: ${fullPath}`);
+                } catch (e) {
+                    console.warn(`[WhatsApp Bridge] Could not remove lock ${fullPath}:`, e.message);
+                }
+            }
+        }
+    }
+}
+clearStaleChromiumLocks(SESSION_DATA_PATH);
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
@@ -124,7 +162,8 @@ client.on('disconnected', async (reason) => {
     console.warn(`[WhatsApp Bridge] WhatsApp disconnected. Reason: ${reason}`);
     console.log('[WhatsApp Bridge] Re-initializing client in 5 seconds...');
     setTimeout(() => {
-        client.initialize().catch(err => console.error('[WhatsApp Bridge] Reconnect failed:', err));
+        clearStaleChromiumLocks(SESSION_DATA_PATH);
+        client.initialize().catch(err => console.error('[WhatsApp Bridge] Reconnect failed:', err && err.stack ? err.stack : err));
     }, 5000);
 });
 
@@ -338,6 +377,7 @@ app.listen(PORT, '0.0.0.0', () => {
     // v2: log the full error (stack + any nested puppeteer message) and retry
     // instead of leaving the client dead after one failed attempt.
     const startClient = (attempt = 1) => {
+        clearStaleChromiumLocks(SESSION_DATA_PATH);
         client.initialize().catch(err => {
             console.error(`[WhatsApp Bridge] Failed to initialize WhatsApp Client (attempt ${attempt}):`, err && err.stack ? err.stack : err);
             const delay = Math.min(30000, 5000 * attempt);
