@@ -35,8 +35,21 @@ const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH ||
 
 console.log(`[WhatsApp Bridge] Initializing with Session Path: ${SESSION_DATA_PATH}`);
 console.log(`[WhatsApp Bridge] Webhook URL: ${FASTAPI_WEBHOOK_URL}`);
+
+// v2: fail fast with a clear message instead of letting puppeteer throw the
+// opaque "Failed to launch the browser process: Code: 21" error later.
 if (executablePath) {
     console.log(`[WhatsApp Bridge] Using Chromium binary at: ${executablePath}`);
+    if (!fs.existsSync(executablePath)) {
+        console.error(`[WhatsApp Bridge] FATAL: Chromium binary not found at "${executablePath}".`);
+        console.error('[WhatsApp Bridge] This usually means the platform built your app WITHOUT the provided Dockerfile');
+        console.error('[WhatsApp Bridge] (e.g. Railway/Render/Koyeb using Nixpacks auto-detect instead of Docker),');
+        console.error('[WhatsApp Bridge] so `apt-get install chromium` never ran. Force the platform to build from ./Dockerfile.');
+        process.exit(1);
+    }
+} else {
+    console.warn('[WhatsApp Bridge] No system Chromium found at /usr/bin/chromium(-browser) and PUPPETEER_EXECUTABLE_PATH is unset.');
+    console.warn('[WhatsApp Bridge] Puppeteer will try to use its bundled Chromium, which is usually skipped in this image (PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true) and will crash on launch.');
 }
 
 const client = new Client({
@@ -46,6 +59,10 @@ const client = new Client({
     puppeteer: {
         headless: true,
         executablePath: executablePath,
+        // v2: dumpio surfaces Chromium's own stderr (the real crash reason —
+        // missing .so, OOM, etc.) instead of just the generic exit code.
+        dumpio: true,
+        protocolTimeout: 120000,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -54,7 +71,12 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--disable-gpu',
-            '--single-process'
+            '--disable-software-rasterizer',
+            '--disable-extensions'
+            // v2: removed '--single-process' — this flag is the #1 cause of
+            // "Failed to launch the browser process: Code: 21" on container
+            // platforms (Railway/Render/Koyeb) because Chromium's sandboxed
+            // single-process mode segfaults under cgroup memory/CPU limits.
         ]
     }
 });
@@ -313,7 +335,15 @@ app.post('/send-media', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[WhatsApp Bridge] HTTP Server running on http://0.0.0.0:${PORT}`);
     console.log('[WhatsApp Bridge] Initializing WhatsApp Web Client...');
-    client.initialize().catch(err => {
-        console.error('[WhatsApp Bridge] Failed to initialize WhatsApp Client:', err);
-    });
+    // v2: log the full error (stack + any nested puppeteer message) and retry
+    // instead of leaving the client dead after one failed attempt.
+    const startClient = (attempt = 1) => {
+        client.initialize().catch(err => {
+            console.error(`[WhatsApp Bridge] Failed to initialize WhatsApp Client (attempt ${attempt}):`, err && err.stack ? err.stack : err);
+            const delay = Math.min(30000, 5000 * attempt);
+            console.log(`[WhatsApp Bridge] Retrying in ${delay / 1000}s...`);
+            setTimeout(() => startClient(attempt + 1), delay);
+        });
+    };
+    startClient();
 });
