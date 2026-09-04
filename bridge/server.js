@@ -11,6 +11,8 @@ const FASTAPI_WEBHOOK_URL = process.env.FASTAPI_WEBHOOK_URL || 'http://localhost
 const SESSION_DATA_PATH = process.env.SESSION_DATA_PATH || path.join(__dirname, '..', 'data', 'session');
 const MEDIA_STORAGE_PATH = process.env.MEDIA_STORAGE_PATH || path.join(__dirname, '..', 'data', 'media');
 
+console.log('[WhatsApp Bridge] BUILD MARKER: v3-lstat-fix-' + new Date().toISOString());
+
 // Ensure storage directories exist
 if (!fs.existsSync(SESSION_DATA_PATH)) {
     fs.mkdirSync(SESSION_DATA_PATH, { recursive: true });
@@ -39,12 +41,19 @@ function removeStaleChromiumLocks(sessionPath) {
         for (const lockFile of lockFiles) {
             const lockPath = path.join(dir, lockFile);
             try {
-                if (fs.existsSync(lockPath)) {
-                    fs.unlinkSync(lockPath);
-                    console.log(`[WhatsApp Bridge] Removed stale Chromium lock: ${lockPath}`);
-                }
+                // SingletonLock is a symlink pointing to "<hostname>-<pid>" of
+                // whichever container last held it. Since Railway containers
+                // get a fresh hostname on every deploy/restart, that target
+                // never resolves again — and fs.existsSync() follows symlinks,
+                // so it wrongly reports "doesn't exist" for a broken link and
+                // skips it. lstatSync sees the symlink itself, broken or not.
+                fs.lstatSync(lockPath);
+                fs.unlinkSync(lockPath);
+                console.log(`[WhatsApp Bridge] Removed stale Chromium lock: ${lockPath}`);
             } catch (err) {
-                console.warn(`[WhatsApp Bridge] Could not remove lock ${lockPath}:`, err.message);
+                if (err.code !== 'ENOENT') {
+                    console.warn(`[WhatsApp Bridge] Could not remove lock ${lockPath}:`, err.message);
+                }
             }
         }
     }
