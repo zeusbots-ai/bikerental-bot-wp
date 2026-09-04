@@ -19,6 +19,38 @@ if (!fs.existsSync(MEDIA_STORAGE_PATH)) {
     fs.mkdirSync(MEDIA_STORAGE_PATH, { recursive: true });
 }
 
+// Chromium refuses to launch if it finds singleton lock files left behind
+// by a process that was killed without a clean shutdown (e.g. a redeploy
+// that replaced the container mid-session). Since only one bridge instance
+// ever runs against this volume, it's always safe to clear these on boot.
+function removeStaleChromiumLocks(sessionPath) {
+    const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+    const searchDirs = [sessionPath];
+    try {
+        for (const entry of fs.readdirSync(sessionPath, { withFileTypes: true })) {
+            if (entry.isDirectory()) {
+                searchDirs.push(path.join(sessionPath, entry.name));
+            }
+        }
+    } catch (err) {
+        // sessionPath may not exist yet on first run — nothing to clean
+    }
+    for (const dir of searchDirs) {
+        for (const lockFile of lockFiles) {
+            const lockPath = path.join(dir, lockFile);
+            try {
+                if (fs.existsSync(lockPath)) {
+                    fs.unlinkSync(lockPath);
+                    console.log(`[WhatsApp Bridge] Removed stale Chromium lock: ${lockPath}`);
+                }
+            } catch (err) {
+                console.warn(`[WhatsApp Bridge] Could not remove lock ${lockPath}:`, err.message);
+            }
+        }
+    }
+}
+removeStaleChromiumLocks(SESSION_DATA_PATH);
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
@@ -337,6 +369,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('[WhatsApp Bridge] Initializing WhatsApp Web Client...');
 
     const startClient = (attempt = 1) => {
+        removeStaleChromiumLocks(SESSION_DATA_PATH);
         client.initialize().catch(err => {
             console.error(`[WhatsApp Bridge] Failed to initialize WhatsApp Client (attempt ${attempt}):`, err.message);
             if (attempt < 5) {
