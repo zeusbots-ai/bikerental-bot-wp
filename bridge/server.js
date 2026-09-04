@@ -335,7 +335,18 @@ app.post('/send-media', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[WhatsApp Bridge] HTTP Server running on http://0.0.0.0:${PORT}`);
     console.log('[WhatsApp Bridge] Initializing WhatsApp Web Client...');
-    client.initialize().catch(err => {
-        console.error('[WhatsApp Bridge] Failed to initialize WhatsApp Client:', err);
-    });
+
+    const startClient = (attempt = 1) => {
+        client.initialize().catch(err => {
+            console.error(`[WhatsApp Bridge] Failed to initialize WhatsApp Client (attempt ${attempt}):`, err.message);
+            if (attempt < 5) {
+                const delay = Math.min(5000 * attempt, 20000);
+                console.log(`[WhatsApp Bridge] Retrying initialization in ${delay / 1000}s...`);
+                setTimeout(() => startClient(attempt + 1), delay);
+            } else {
+                console.error('[WhatsApp Bridge] Giving up after 5 attempts. Manual redeploy/restart needed.');
+            }
+        });
+    };
+    startClient();
 });
