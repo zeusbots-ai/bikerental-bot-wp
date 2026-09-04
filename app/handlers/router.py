@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional
 from app.admin.commands import AdminCommandHandler, is_admin_authorized
 from app.handlers.customer_flow import CustomerFlowHandler
 from app.services.whatsapp.service import whatsapp_service
+from app.database import get_database
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,7 @@ async def route_inbound_message(payload: Dict[str, Any]) -> None:
     Routes admin commands to AdminCommandHandler and conversation messages to CustomerFlowHandler.
     """
     sender_phone = payload.get("sender_phone", "")
+    sender_jid = payload.get("sender_jid") or payload.get("from") or ""
     body = (payload.get("body") or "").strip()
     has_media = bool(payload.get("has_media"))
     media = payload.get("media")
@@ -20,6 +22,20 @@ async def route_inbound_message(payload: Dict[str, Any]) -> None:
     if not clean_phone:
         logger.warning(f"[Router] Received inbound message with empty phone number: {payload}")
         return
+
+    # Remember the exact WhatsApp JID for this phone (handles @lid contacts,
+    # not just @c.us) so replies go back to the right identifier.
+    if sender_jid:
+        db = get_database()
+        if db is not None:
+            try:
+                await db.users.update_one(
+                    {"phone_number": clean_phone},
+                    {"$set": {"wa_jid": sender_jid}},
+                    upsert=True
+                )
+            except Exception as e:
+                logger.error(f"[Router] Failed to persist wa_jid for {clean_phone}: {e}")
 
     logger.info(f"[Router] Incoming message from {clean_phone}: '{body[:50]}' (has_media={has_media})")
 
