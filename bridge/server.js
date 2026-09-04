@@ -254,6 +254,28 @@ app.get('/qr-data', (req, res) => {
     });
 });
 
+// WhatsApp has been migrating some contacts to privacy-preserving @lid
+// addressing instead of the classic @c.us phone-number JID. Sending directly
+// to a guessed @c.us id for such a contact throws "No LID for user". Forcing
+// a resolution via getNumberId() makes the client look up the contact's
+// current WhatsApp id (whichever form it actually uses) before sending.
+async function resolveChatId(rawTo) {
+    const toStr = rawTo.toString();
+    if (toStr.includes('@')) {
+        return toStr; // already a full JID (e.g. stored @lid) — trust it
+    }
+    const digits = toStr.replace(/[^0-9]/g, '');
+    try {
+        const numberId = await client.getNumberId(digits);
+        if (numberId && numberId._serialized) {
+            return numberId._serialized;
+        }
+    } catch (err) {
+        console.warn(`[WhatsApp Bridge] getNumberId lookup failed for ${digits}, falling back to @c.us:`, err.message);
+    }
+    return `${digits}@c.us`;
+}
+
 app.post('/send-message', async (req, res) => {
     const { to, message } = req.body;
     if (!to || !message) {
@@ -265,8 +287,7 @@ app.post('/send-message', async (req, res) => {
     }
 
     try {
-        const toStr = to.toString();
-        const chatId = toStr.includes('@') ? toStr : `${toStr.replace(/[^0-9]/g, '')}@c.us`;
+        const chatId = await resolveChatId(to);
 
         // Optional natural typing simulation delay
         const delayMs = Math.floor(Math.random() * 500) + 300;
@@ -300,8 +321,7 @@ app.post('/send-media', async (req, res) => {
             media.mimetype = mimetype;
         }
 
-        const toStr = to.toString();
-        const chatId = toStr.includes('@') ? toStr : `${toStr.replace(/[^0-9]/g, '')}@c.us`;
+        const chatId = await resolveChatId(to);
 
         const result = await client.sendMessage(chatId, media, { caption: caption || '' });
         res.json({ success: true, messageId: result.id.id });
