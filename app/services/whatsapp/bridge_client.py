@@ -2,9 +2,29 @@ import logging
 import httpx
 from typing import Dict, Any, Optional
 from app.config import settings
+from app.database import get_database
 from app.services.whatsapp.base import WhatsAppClientInterface
 
 logger = logging.getLogger(__name__)
+
+async def _resolve_target(to: str) -> str:
+    """
+    'to' is usually a plain phone number. If we've previously stored the
+    real WhatsApp JID for this number (e.g. it's a @lid contact rather than
+    @c.us), use that exact JID instead of guessing one from digits.
+    """
+    clean_to = "".join(filter(str.isdigit, str(to)))
+    if "@" in str(to):
+        return str(to)  # already a full JID, use as-is
+    try:
+        db = get_database()
+        if db is not None:
+            user = await db.users.find_one({"phone_number": clean_to}, {"wa_jid": 1})
+            if user and user.get("wa_jid"):
+                return user["wa_jid"]
+    except Exception as e:
+        logger.error(f"[BridgeClient] Failed to look up wa_jid for {clean_to}: {e}")
+    return clean_to
 
 class WhatsAppBridgeClient(WhatsAppClientInterface):
     """
@@ -16,7 +36,7 @@ class WhatsAppBridgeClient(WhatsAppClientInterface):
         self.client = httpx.AsyncClient(timeout=30.0)
 
     async def send_text_message(self, to: str, message: str) -> bool:
-        clean_to = "".join(filter(str.isdigit, str(to)))
+        clean_to = await _resolve_target(to)
         url = f"{self.base_url}/send-message"
         try:
             resp = await self.client.post(url, json={"to": clean_to, "message": message})
@@ -35,7 +55,7 @@ class WhatsAppBridgeClient(WhatsAppClientInterface):
         caption: str = "",
         mime_type: Optional[str] = None
     ) -> bool:
-        clean_to = "".join(filter(str.isdigit, str(to)))
+        clean_to = await _resolve_target(to)
         url = f"{self.base_url}/send-media"
         payload = {
             "to": clean_to,
